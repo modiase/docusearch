@@ -1,0 +1,20 @@
+Machine Learning Fundamentals
+
+Machine learning is a subset of artificial intelligence that enables computers to learn and make decisions without being explicitly programmed. It focuses on developing algorithms that can access data and use it to learn for themselves.
+
+Types of Machine Learning:
+1. Supervised Learning - Learning from labeled training data
+2. Unsupervised Learning - Finding patterns in unlabeled data
+3. Reinforcement Learning - Learning through interaction with environment
+
+Common Applications:
+- Image and speech recognition
+- Natural language processing
+- Recommendation systems
+- Fraud detection
+- Medical diagnosis
+- Financial forecasting
+
+Popular algorithms include linear regression, decision trees, random forests, support vector machines, and neural networks. Deep learning, a subset of machine learning, uses artificial neural networks with multiple layers to model complex patterns.
+
+The field continues to evolve rapidly with new techniques and applications being developed constantly. 
