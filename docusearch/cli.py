@@ -2,49 +2,65 @@
 Command-line interface for DocuSearch
 """
 
-import json
-import os
+import contextlib
 import readline
 import time
+from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Optional
+from typing import Final, Optional, ParamSpec, TypeVar
 
 import click
 
 from .storage import DocumentStorage
 
-# History file path
-HISTORY_FILE = ".docusearch_history"
+HISTORY_FILE: Final = Path(".docusearch_history")
+DEFAULT_HISTORY_LENGTH: Final = 1000
+
+PROJECT_DESCRIPTION: Final = """
+DocuSearch - a document storage library.
+"""
 
 
-def setup_readline():
+P, R = ParamSpec("P"), TypeVar("R")
+
+
+def docstring(docstring: str) -> Callable[[Callable[P, R]], Callable[P, R]]:
+    """Decorator to add a docstring to a function."""
+
+    def decorator(func: Callable[P, R]) -> Callable[P, R]:
+        func.__doc__ = docstring
+        return func
+
+    return decorator
+
+
+def setup_readline() -> None:
     """Setup readline for command history"""
-    # Set history file
-    readline.set_history_length(1000)
+    readline.set_history_length(DEFAULT_HISTORY_LENGTH)
 
-    # Try to load existing history
-    if os.path.exists(HISTORY_FILE):
-        try:
+    if HISTORY_FILE.exists():
+        with contextlib.suppress(Exception):
             readline.read_history_file(HISTORY_FILE)
-        except Exception:
-            pass
-
-    # Set up completion (optional - could be enhanced later)
     readline.parse_and_bind("tab: complete")
 
 
-def save_history():
+def save_history() -> None:
     """Save command history to file"""
-    try:
+    with contextlib.suppress(Exception):
         readline.write_history_file(HISTORY_FILE)
-    except Exception:
-        pass
+
+
+@contextlib.contextmanager
+def stopwatch() -> Iterator[Callable[[], float]]:
+    """Stopwatch context manager"""
+    start_time = time.time()
+    yield lambda: time.time() - start_time
 
 
 @click.group()
 @click.version_option()
-def main():
-    """DocuSearch - In-memory document storage with TF-IDF search"""
+@docstring(PROJECT_DESCRIPTION)
+def main() -> None:
     pass
 
 
@@ -54,27 +70,15 @@ def main():
 @click.option(
     "--storage-file", "-s", type=click.Path(), help="Storage file to load/save"
 )
-def add(file_path: Path, doc_id: Optional[str], storage_file: Optional[str]):
+def add(file_path: Path, doc_id: Optional[str], storage_file: Optional[Path]) -> None:
     """Add a document from a file path or all files in a directory"""
-    storage = DocumentStorage()
-
-    # Load existing storage if file provided
-    if storage_file and Path(storage_file).exists():
-        try:
-            storage = load_storage(storage_file)
-            click.echo(f"Loaded existing storage from {storage_file}")
-        except Exception as e:
-            click.echo(f"Error loading storage: {e}", err=True)
-            raise click.Abort()
+    storage = load_storage(storage_file, raises=False)
 
     try:
         if file_path.is_file():
-            # Single file
             if doc_id:
-                # Use custom document ID for single file
-                content = storage.documents.get(str(file_path), "")
+                content = storage._doc_id_to_document.get(str(file_path), "")
                 if not content:
-                    # Read file content
                     try:
                         with open(file_path, "r", encoding="utf-8") as f:
                             content = f.read()
@@ -85,11 +89,9 @@ def add(file_path: Path, doc_id: Optional[str], storage_file: Optional[str]):
                 doc_id = storage.add_document(content, doc_id)
                 click.echo(f"Document added with ID: {doc_id}")
             else:
-                # Use default behavior
                 doc_ids = storage.add_document_from_path(str(file_path))
                 click.echo(f"Document added with ID: {doc_ids[0]}")
-        else:
-            # Directory
+        elif file_path.is_dir():
             if doc_id:
                 click.echo(
                     "Warning: --doc-id option is ignored when adding a directory"
@@ -99,9 +101,11 @@ def add(file_path: Path, doc_id: Optional[str], storage_file: Optional[str]):
             click.echo(f"Added {len(doc_ids)} documents from directory")
             for doc_id in doc_ids:
                 click.echo(f"  - {doc_id}")
+        else:
+            click.echo(f"Path is neither a file nor directory: {file_path}", err=True)
+            raise click.Abort()
 
-        # Save storage if file provided
-        if storage_file:
+        if storage_file is not None:
             try:
                 save_storage(storage, storage_file)
                 click.echo(f"Storage saved to {storage_file}")
@@ -119,7 +123,7 @@ def add(file_path: Path, doc_id: Optional[str], storage_file: Optional[str]):
 @click.option(
     "--storage-file", "-s", type=click.Path(), help="Storage file to load/save"
 )
-def search(query: str, top_k: int, storage_file: Optional[str]):
+def search(query: str, top_k: int, storage_file: Optional[Path]) -> None:
     """Search for documents using smart search (exact + wildcard prefix)
 
     Smart search rules:
@@ -127,34 +131,23 @@ def search(query: str, top_k: int, storage_file: Optional[str]):
     - If query ends with *, use prefix search (e.g., "prog*")
     - Use \\* to search for literal * (escape the wildcard)
     """
-    storage = DocumentStorage()
+    storage = load_storage(storage_file, raises=False)
 
-    # Load storage if file provided
-    if storage_file and Path(storage_file).exists():
-        try:
-            storage = load_storage(storage_file)
-        except Exception as e:
-            click.echo(f"Error loading storage: {e}", err=True)
-            raise click.Abort()
+    with stopwatch() as now:
+        results = storage.smart_search(query, top_k)
 
-    # Time the search
-    start_time = time.time()
-    results = storage.smart_search(query, top_k)
-    search_time = time.time() - start_time
+        if not results:
+            click.echo("No results found.")
+            click.echo(f"Search completed in {now():.4f} seconds")
+            return
 
-    if not results:
-        click.echo("No results found.")
-        click.echo(f"Search completed in {search_time:.4f} seconds")
-        return
+        search_type = "exact"
+        if query.endswith("*") and not query.endswith("\\*"):
+            search_type = "prefix"
 
-    # Determine search type for display
-    search_type = "exact"
-    if query.endswith("*") and not query.endswith("\\*"):
-        search_type = "prefix"
-
-    click.echo(
-        f"Found {len(results)} results for '{query}' ({search_type}) in {search_time:.4f} seconds:\n"
-    )
+        click.echo(
+            f"Found {len(results)} results for '{query}' ({search_type}) in {now():.4f} seconds:\n"
+        )
 
     for i, (doc_id, score, preview) in enumerate(results, 1):
         click.echo(f"{i}. Document: {doc_id}")
@@ -168,47 +161,28 @@ def search(query: str, top_k: int, storage_file: Optional[str]):
 @click.option("--storage-file", "-s", type=click.Path(), help="Storage file to load")
 def prefix(prefix: str, storage_file: Optional[str]):
     """Search for words that start with a prefix"""
-    storage = DocumentStorage()
+    storage = load_storage(storage_file, raises=False)
 
-    # Load storage if file provided
-    if storage_file and Path(storage_file).exists():
-        try:
-            storage = load_storage(storage_file)
-        except Exception as e:
-            click.echo(f"Error loading storage: {e}", err=True)
-            raise click.Abort()
+    with stopwatch() as now:
+        words = storage.prefix_search(prefix)
 
-    # Time the prefix search
-    start_time = time.time()
-    words = storage.prefix_search(prefix)
-    search_time = time.time() - start_time
+        if not words:
+            click.echo(f"No words found starting with '{prefix}'")
+            click.echo(f"Prefix search completed in {now():.4f} seconds")
+            return
 
-    if not words:
-        click.echo(f"No words found starting with '{prefix}'")
-        click.echo(f"Prefix search completed in {search_time:.4f} seconds")
-        return
-
-    click.echo(f"Words starting with '{prefix}' (found in {search_time:.4f} seconds):")
-    for word in sorted(words):
-        click.echo(f"  {word}")
+        click.echo(f"Words starting with '{prefix}' (found in {now():.4f} seconds):")
+        for word in sorted(words):
+            click.echo(f"  {word}")
 
 
 @main.command()
 @click.argument("file_path", type=click.Path(path_type=Path))
 @click.option("--storage-file", "-s", type=click.Path(), help="Storage file to save to")
-def add_and_search(file_path: Path, storage_file: Optional[str]):
+def add_and_search(file_path: Path, storage_file: Optional[Path]) -> None:
     """Add a document and then start an interactive search session"""
-    storage = DocumentStorage()
+    storage = load_storage(storage_file, raises=False)
 
-    # Load existing storage if file provided
-    if storage_file and Path(storage_file).exists():
-        try:
-            storage = load_storage(storage_file)
-        except Exception as e:
-            click.echo(f"Error loading storage: {e}", err=True)
-            raise click.Abort()
-
-    # Add the document
     try:
         doc_ids = storage.add_document_from_path(str(file_path))
         if len(doc_ids) == 1:
@@ -221,45 +195,37 @@ def add_and_search(file_path: Path, storage_file: Optional[str]):
         click.echo(f"Error adding document: {e}", err=True)
         raise click.Abort()
 
-    # Save storage if file provided
-    if storage_file:
-        try:
-            save_storage(storage, storage_file)
-            click.echo(f"Storage saved to {storage_file}")
-        except Exception as e:
-            click.echo(f"Error saving storage: {e}", err=True)
+    if storage_file is not None:
+        save_storage(storage, storage_file, raises=False)
 
-    # Start interactive search
     click.echo("\nStarting interactive search session (type 'quit' to exit):")
 
     while True:
+        # TODO: Use prompt_toolkit for better input handling
         try:
             query = click.prompt("Search query")
             if query.lower() in ["quit", "exit", "q"]:
                 break
 
-            # Time the search
-            start_time = time.time()
-            results = storage.smart_search(query, 5)
-            search_time = time.time() - start_time
+            with stopwatch() as now:
+                results = storage.smart_search(query, 5)
 
-            if not results:
-                click.echo("No results found.")
-                click.echo(f"Search completed in {search_time:.4f} seconds")
-                continue
+                if not results:
+                    click.echo("No results found.")
+                    click.echo(f"Search completed in {now():.4f} seconds")
+                    continue
 
-            # Determine search type for display
-            search_type = "exact"
-            if query.endswith("*") and not query.endswith("\\*"):
-                search_type = "prefix"
+                search_type = "exact"
+                if query.endswith("*") and not query.endswith("\\*"):
+                    search_type = "prefix"
 
-            click.echo(
-                f"\nFound {len(results)} results ({search_type}) in {search_time:.4f} seconds:"
-            )
-            for i, (doc_id, score, preview) in enumerate(results, 1):
-                click.echo(f"{i}. {doc_id} (score: {score:.4f})")
-                click.echo(f"   {preview}")
-                click.echo()
+                click.echo(
+                    f"\nFound {len(results)} results ({search_type}) in {now():.4f} seconds:"
+                )
+                for i, (doc_id, score, preview) in enumerate(results, 1):
+                    click.echo(f"{i}. {doc_id} (score: {score:.4f})")
+                    click.echo(f"   {preview}")
+                    click.echo()
 
         except KeyboardInterrupt:
             break
@@ -271,15 +237,7 @@ def add_and_search(file_path: Path, storage_file: Optional[str]):
 @click.option("--storage-file", "-s", type=click.Path(), help="Storage file to load")
 def stats(storage_file: Optional[str]):
     """Show storage statistics"""
-    storage = DocumentStorage()
-
-    # Load storage if file provided
-    if storage_file and Path(storage_file).exists():
-        try:
-            storage = load_storage(storage_file)
-        except Exception as e:
-            click.echo(f"Error loading storage: {e}", err=True)
-            raise click.Abort()
+    storage = load_storage(storage_file, raises=False)
 
     stats = storage.get_stats()
 
@@ -292,14 +250,12 @@ def stats(storage_file: Optional[str]):
 @main.command()
 def repl():
     """Start an interactive REPL for document management"""
-    # Setup readline for command history
     setup_readline()
 
     storage = DocumentStorage()
     click.echo(
         "DocuSearch REPL - type 'help' for commands. All data is in-memory and will be lost on exit."
     )
-    click.echo("Use ↑/↓ arrows to navigate command history.")
 
     while True:
         try:
@@ -309,7 +265,7 @@ def repl():
             if cmd in {"exit", "quit", "q"}:
                 click.echo("Exiting REPL.")
                 break
-            elif cmd == "help":
+            elif cmd in {"help", "h", "?"}:
                 click.echo("""
 Commands:
   add <path>             Add a document from a file or all text files from a directory
@@ -358,49 +314,44 @@ Smart search rules:
                     click.echo(f"No such document: {doc_id.strip()}")
             elif cmd.startswith("search "):
                 _, query = cmd.split(" ", 1)
-                # Time the search
-                start_time = time.time()
-                results = storage.smart_search(query.strip(), top_k=5)
-                search_time = time.time() - start_time
+                with stopwatch() as now:
+                    results = storage.smart_search(query.strip(), top_k=5)
 
-                if not results:
-                    click.echo("No results found.")
-                    click.echo(f"Search completed in {search_time:.4f} seconds")
-                else:
-                    # Determine search type for display
-                    search_type = "exact"
-                    if query.strip().endswith("*") and not query.strip().endswith(
-                        "\\*"
-                    ):
-                        search_type = "prefix"
+                    if not results:
+                        click.echo("No results found.")
+                        click.echo(f"Search completed in {now():.4f} seconds")
+                    else:
+                        search_type = "exact"
+                        if query.strip().endswith("*") and not query.strip().endswith(
+                            "\\*"
+                        ):
+                            search_type = "prefix"
 
-                    click.echo(
-                        f"Found {len(results)} results ({search_type}) in {search_time:.4f} seconds:"
-                    )
-                    for i, (doc_id, score, preview) in enumerate(results, 1):
                         click.echo(
-                            f"{i}. {doc_id} (score: {score:.4f})\n   {preview}\n"
+                            f"Found {len(results)} results ({search_type}) in {now():.4f} seconds:"
                         )
+                        for i, (doc_id, score, preview) in enumerate(results, 1):
+                            click.echo(
+                                f"{i}. {doc_id} (score: {score:.4f})\n   {preview}\n"
+                            )
             elif cmd.startswith("prefix "):
                 _, prefix = cmd.split(" ", 1)
-                # Time the prefix search
-                start_time = time.time()
-                words = storage.prefix_search(prefix.strip())
-                search_time = time.time() - start_time
+                with stopwatch() as now:
+                    words = storage.prefix_search(prefix.strip())
 
-                if not words:
-                    click.echo(f"No words found starting with '{prefix.strip()}'")
-                    click.echo(f"Prefix search completed in {search_time:.4f} seconds")
-                else:
-                    click.echo(
-                        f"Words (found in {search_time:.4f} seconds): {', '.join(sorted(words))}"
-                    )
+                    if not words:
+                        click.echo(f"No words found starting with '{prefix.strip()}'")
+                        click.echo(f"Prefix search completed in {now():.4f} seconds")
+                    else:
+                        click.echo(
+                            f"Words (found in {now():.4f} seconds): {', '.join(sorted(words))}"
+                        )
             elif cmd == "stats":
                 stats = storage.get_stats()
                 click.echo(f"Total documents: {stats['total_documents']}")
                 click.echo(f"Total unique words: {stats['total_words']}")
             elif cmd == "list":
-                doc_ids = list(storage.documents.keys())
+                doc_ids = list(storage._doc_id_to_document.keys())
                 if not doc_ids:
                     click.echo("No documents in storage.")
                 else:
@@ -413,54 +364,33 @@ Smart search rules:
             click.echo("\nExiting REPL.")
             break
 
-    # Save command history before exiting
     save_history()
 
 
-def save_storage(storage: DocumentStorage, file_path: str) -> None:
+def save_storage(
+    storage: DocumentStorage, file_path: Path, raises: bool = True
+) -> None:
     """Save storage to a JSON file"""
-    # Note: We can't easily serialize the trie with document mappings
-    # So we'll save the basic data and rebuild the trie on load
-    data = {
-        "documents": storage.documents,
-        "doc_counter": storage.doc_counter,
-        "total_documents": storage.total_documents,
-        "forward_index": {
-            "documents": storage.forward_index.documents,
-            "doc_lengths": storage.forward_index.doc_lengths,
-        },
-    }
-
-    with open(file_path, "w") as f:
-        json.dump(data, f, indent=2)
+    try:
+        storage.save(file_path)
+    except Exception as e:
+        if raises:
+            raise
+        click.echo(f"Error saving storage: {e}", err=True)
 
 
-def load_storage(file_path: str) -> DocumentStorage:
+def load_storage(file_path: Path, raises: bool = True) -> DocumentStorage:
     """Load storage from a JSON file"""
-    with open(file_path, "r") as f:
-        data = json.load(f)
+    try:
+        storage = DocumentStorage.load(file_path)
 
-    storage = DocumentStorage()
-
-    # Restore documents
-    storage.documents = data["documents"]
-    storage.doc_counter = data["doc_counter"]
-    storage.total_documents = data.get("total_documents", len(data["documents"]))
-
-    # Restore forward index
-    storage.forward_index.documents = data["forward_index"]["documents"]
-    storage.forward_index.doc_lengths = data["forward_index"]["doc_lengths"]
-
-    # Rebuild trie with document mappings
-    for doc_id, word_counts in storage.forward_index.documents.items():
-        for word, count in word_counts.items():
-            # Insert word if not already present
-            if not storage.trie.search(word):
-                storage.trie.insert(word)
-            # Add document to word's document set
-            storage.trie.add_document_to_word(word, doc_id, count)
-
-    return storage
+    except Exception as e:
+        click.echo(f"Error loading storage: {e}", err=True)
+        if raises:
+            raise
+        return DocumentStorage()
+    else:
+        return storage
 
 
 if __name__ == "__main__":

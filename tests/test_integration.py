@@ -19,7 +19,6 @@ class TestDocumentStorageIntegration:
     @pytest.fixture
     def sample_files(self, tmp_path):
         """Create sample files for testing"""
-        # Create sample documents
         sample_docs = {
             "sample_documents.txt": "Python is a programming language. Python is used for web development and data science.",
             "machine_learning.txt": "Machine learning algorithms are used in artificial intelligence. Deep learning is a subset of machine learning.",
@@ -45,7 +44,8 @@ class TestDocumentStorageIntegration:
         captured = capsys.readouterr()
         assert "Adding sample documents..." in captured.out
         assert "Added:" in captured.out
-        assert len(storage.documents) == 3
+        stats = storage.get_stats()
+        assert stats["total_documents"] == 3
 
     def test_add_custom_document(self, storage, capsys):
         """Test adding a custom document with text content"""
@@ -59,7 +59,8 @@ class TestDocumentStorageIntegration:
         captured = capsys.readouterr()
         assert "Custom document -> data_science_doc" in captured.out
         assert custom_doc_id == "data_science_doc"
-        assert custom_doc_id in storage.documents
+        doc_info = storage.get_document_info(custom_doc_id)
+        assert doc_info is not None
 
     def test_storage_statistics(self, storage, sample_files, capsys):
         """Test storage statistics output"""
@@ -140,7 +141,9 @@ class TestDocumentStorageIntegration:
             storage.add_document_from_path(file_path)
 
         print("5. Document Details:")
-        for doc_id in storage.documents.keys():
+        stats = storage.get_stats()
+        for file_path in sample_files.values():
+            doc_id = str(file_path)
             info = storage.get_document_info(doc_id)
             if info:
                 print(
@@ -196,12 +199,19 @@ class TestDocumentStorageIntegration:
 
         # Show document details
         print("\n5. Document Details:")
-        for doc_id in storage.documents.keys():
+        for file_path in sample_files.values():
+            doc_id = str(file_path)
             info = storage.get_document_info(doc_id)
             if info:
                 print(
                     f"   {doc_id}: {info['total_words']} words, {info['unique_words']} unique words"
                 )
+
+        custom_info = storage.get_document_info(custom_doc_id)
+        if custom_info:
+            print(
+                f"   {custom_doc_id}: {custom_info['total_words']} words, {custom_info['unique_words']} unique words"
+            )
 
         print("\n" + "=" * 50)
         print("Demonstration completed!")
@@ -218,9 +228,11 @@ class TestDocumentStorageIntegration:
         assert "Document Details:" in output
         assert "Demonstration completed!" in output
 
-        # Verify document operations worked
-        assert len(storage.documents) == 4  # 3 files + 1 custom
-        assert "data_science_doc" in storage.documents
+        # Verify document operations worked using public methods
+        final_stats = storage.get_stats()
+        assert final_stats["total_documents"] == 4  # 3 files + 1 custom
+        custom_doc_info = storage.get_document_info(custom_doc_id)
+        assert custom_doc_info is not None
 
     def test_search_with_no_results(self, storage, capsys):
         """Test search behavior when no results are found"""
@@ -259,5 +271,7 @@ class TestDocumentStorageIntegration:
         assert "Added:" in captured.out
         assert "Deleted:" in captured.out
         assert result is True
-        assert doc_id not in storage.documents
-        assert len(storage.documents) == 0
+        doc_info_after = storage.get_document_info(doc_id)
+        assert doc_info_after is None
+        final_stats = storage.get_stats()
+        assert final_stats["total_documents"] == 0

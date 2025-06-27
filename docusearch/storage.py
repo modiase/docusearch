@@ -1,15 +1,26 @@
+from __future__ import annotations
+
+import uuid
+from collections.abc import Iterable, MutableMapping, Sequence
+
 """
 Main document storage class with TF-IDF search
 """
 
+import json
 import math
 import re
 from collections import Counter
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import List, MutableMapping, Optional, Tuple
 
 from .index import ForwardIndex
 from .trie import Trie
+
+
+def generate_doc_id() -> str:
+    """Generate a unique document ID"""
+    return f"doc_{uuid.uuid4()}"
 
 
 class DocumentStorage:
@@ -17,10 +28,9 @@ class DocumentStorage:
 
     def __init__(self):
         self.trie = Trie()
-        self.forward_index = ForwardIndex()
-        self.documents: Dict[str, str] = {}  # doc_id -> content
-        self.doc_counter = 0
-        self.total_documents = 0
+        self._forward_index = ForwardIndex()
+        self._doc_id_to_document: MutableMapping[str, str] = {}
+        self._total_documents = 0
 
     def add_document_from_path(self, file_path: str) -> List[str]:
         """Add a document from a file path or all files in a directory
@@ -36,10 +46,8 @@ class DocumentStorage:
             raise FileNotFoundError(f"Path not found: {file_path}")
 
         if path.is_file():
-            # Single file
             return [self._add_single_file(path)]
         elif path.is_dir():
-            # Directory - add all files
             return self._add_directory(path)
         else:
             raise ValueError(f"Path is neither a file nor directory: {file_path}")
@@ -50,7 +58,6 @@ class DocumentStorage:
             with open(file_path, "r", encoding="utf-8") as f:
                 content = f.read()
         except UnicodeDecodeError:
-            # Try with different encoding
             with open(file_path, "r", encoding="latin-1") as f:
                 content = f.read()
 
@@ -60,7 +67,6 @@ class DocumentStorage:
         """Add all files in a directory to the storage"""
         added_docs = []
 
-        # Common text file extensions
         text_extensions = {
             ".txt",
             ".md",
@@ -85,60 +91,48 @@ class DocumentStorage:
                     doc_id = self._add_single_file(file_path)
                     added_docs.append(doc_id)
                 except Exception as e:
-                    # Log error but continue with other files
                     print(f"Warning: Could not add {file_path}: {e}")
 
         return added_docs
 
     def add_document(self, content: str, doc_id: Optional[str] = None) -> str:
         """Add a document with given content"""
-        if doc_id is None:
-            self.doc_counter += 1
-            doc_id = f"doc_{self.doc_counter}"
+        if doc_id is not None and doc_id in self._doc_id_to_document:
+            raise ValueError(f"Document with ID {doc_id} already exists")
 
-        # Tokenize and count words
-        words = self._tokenize(content)
-        word_counts = Counter(words)
+        doc_id = generate_doc_id() if doc_id is None else doc_id
 
-        # Store document content
-        self.documents[doc_id] = content
+        word_counts = Counter(self._tokenize(content))
 
-        # Update forward index
-        self.forward_index.add_document(doc_id, word_counts)
+        self._doc_id_to_document[doc_id] = content
 
-        # Update trie with new words and document mappings
+        self._forward_index.add_document(doc_id, word_counts)
+
         for word, count in word_counts.items():
-            # Insert word if not already present
             if not self.trie.search(word):
                 self.trie.insert(word)
-            # Add document to word's document set
             self.trie.add_document_to_word(word, doc_id, count)
 
-        self.total_documents += 1
+        self._total_documents += 1
         return doc_id
 
     def remove_document(self, doc_id: str) -> bool:
         """Remove a document from storage"""
-        if doc_id not in self.documents:
+        if doc_id not in self._doc_id_to_document:
             return False
 
-        # Get word counts before removal
-        word_counts = self.forward_index.get_document_words(doc_id)
+        word_counts = self._forward_index.get_document_words(doc_id)
 
-        # Remove from forward index
-        self.forward_index.remove_document(doc_id)
+        self._forward_index.remove_document(doc_id)
 
-        # Remove document from trie word mappings
         for word in word_counts:
             self.trie.remove_document_from_word(word, doc_id)
 
-        # Remove from documents
-        del self.documents[doc_id]
+        del self._doc_id_to_document[doc_id]
 
-        # Clean up empty words from trie
         self.trie.cleanup_empty_words()
 
-        self.total_documents = max(0, self.total_documents - 1)
+        self._total_documents = max(0, self._total_documents - 1)
         return True
 
     def search(self, query: str, top_k: int = 5) -> List[Tuple[str, float, str]]:
@@ -152,26 +146,22 @@ class DocumentStorage:
         if not query_words:
             return []
 
-        # Calculate TF-IDF scores for each document
-        doc_scores: Dict[str, float] = {}
+        doc_scores: MutableMapping[str, float] = {}
 
         for word in query_words:
             # Get documents containing this word
             docs_with_word = self.trie.get_documents_for_word(word)
 
-            for doc_id, count in docs_with_word.items():
-                # Calculate TF-IDF score for this word in this document
+            for doc_id in docs_with_word:
                 tf_idf = self._calculate_tf_idf(doc_id, word)
 
-                # Add to document's total score
                 doc_scores[doc_id] = doc_scores.get(doc_id, 0) + tf_idf
 
-        # Sort by score and return top-k results
         sorted_docs = sorted(doc_scores.items(), key=lambda x: x[1], reverse=True)
 
         results = []
         for doc_id, score in sorted_docs[:top_k]:
-            content = self.documents.get(doc_id, "")
+            content = self._doc_id_to_document.get(doc_id, "")
             preview = self._get_content_preview(content, query_words)
             results.append((doc_id, score, preview))
 
@@ -179,7 +169,7 @@ class DocumentStorage:
 
     def search_by_prefix(
         self, prefix: str, top_k: int = 5
-    ) -> List[Tuple[str, float, str]]:
+    ) -> Sequence[Tuple[str, float, str]]:
         """
         Search for documents using prefix matching on query terms
 
@@ -189,18 +179,15 @@ class DocumentStorage:
         if not prefix.strip():
             return []
 
-        # Get all documents containing words that start with the prefix
         docs_with_prefix = self.trie.get_documents_for_prefix(prefix.lower())
 
         if not docs_with_prefix:
             return []
 
-        # Calculate scores based on word frequency (simplified scoring for prefix search)
-        doc_scores: Dict[str, float] = {}
+        doc_scores: MutableMapping[str, float] = {}
 
         for doc_id, total_count in docs_with_prefix.items():
-            # Simple scoring: normalize by document length
-            doc_length = self.forward_index.get_document_length(doc_id)
+            doc_length = self._forward_index.get_document_length(doc_id)
             if doc_length > 0:
                 doc_scores[doc_id] = total_count / doc_length
 
@@ -209,7 +196,7 @@ class DocumentStorage:
 
         results = []
         for doc_id, score in sorted_docs[:top_k]:
-            content = self.documents.get(doc_id, "")
+            content = self._doc_id_to_document.get(doc_id, "")
             preview = self._get_content_preview(content, [prefix])
             results.append((doc_id, score, preview))
 
@@ -219,51 +206,45 @@ class DocumentStorage:
         """Search for words that start with the given prefix"""
         return self.trie.starts_with(prefix)
 
-    def get_document_info(self, doc_id: str) -> Optional[Dict]:
+    def get_document_info(self, doc_id: str) -> Optional[MutableMapping]:
         """Get information about a specific document"""
-        if doc_id not in self.documents:
+        if doc_id not in self._doc_id_to_document:
             return None
 
-        word_counts = self.forward_index.get_document_words(doc_id)
-        doc_length = self.forward_index.get_document_length(doc_id)
+        word_counts = self._forward_index.get_document_words(doc_id)
+        doc_length = self._forward_index.get_document_length(doc_id)
 
         return {
             "doc_id": doc_id,
-            "content": self.documents[doc_id],
+            "content": self._doc_id_to_document[doc_id],
             "word_counts": word_counts,
             "total_words": doc_length,
             "unique_words": len(word_counts),
         }
 
-    def get_stats(self) -> Dict:
+    def get_stats(self) -> MutableMapping:
         """Get statistics about the document storage"""
         return {
-            "total_documents": len(self.documents),
+            "total_documents": len(self._doc_id_to_document),
             "total_words": len(self.trie.get_all_words()),
-            "total_documents_in_index": self.total_documents,
+            "total_documents_in_index": self._total_documents,
         }
 
     def _calculate_tf_idf(self, doc_id: str, word: str) -> float:
         """Calculate TF-IDF score for a word in a document"""
-        # Calculate TF
-        tf = self.forward_index.get_tf(doc_id, word)
-
-        # Calculate IDF
+        tf = self._forward_index.get_tf(doc_id, word)
         doc_freq = self.trie.get_document_frequency(word)
         if doc_freq == 0:
             return 0
-        # Use log2((N+1)/(df+1)) + 1 to ensure non-zero scores
-        idf = math.log2((self.total_documents + 1) / (doc_freq + 1)) + 1
+        idf = math.log2((self._total_documents + 1) / (doc_freq + 1)) + 1
 
         return tf * idf
 
-    def _tokenize(self, text: str) -> List[str]:
+    def _tokenize(self, text: str) -> Iterable[str]:
         """Tokenize text into words"""
-        # Remove punctuation and split into words
-        words = re.findall(r"\b[a-zA-Z]+\b", text.lower())
-        # Filter out very short words (likely noise)
-        words = [word for word in words if len(word) > 1]
-        return words
+        return (
+            word for word in re.findall(r"\b[a-zA-Z]+\b", text.lower()) if len(word) > 1
+        )
 
     def _get_content_preview(
         self, content: str, query_words: List[str], max_length: int = 200
@@ -272,7 +253,6 @@ class DocumentStorage:
         if len(content) <= max_length:
             return content
 
-        # Find the first occurrence of any query word
         content_lower = content.lower()
         first_pos = len(content)
 
@@ -281,13 +261,11 @@ class DocumentStorage:
             if pos != -1 and pos < first_pos:
                 first_pos = pos
 
-        # Extract preview around the first query word
         start = max(0, first_pos - 50)
         end = min(len(content), start + max_length)
 
         preview = content[start:end]
 
-        # Add ellipsis if we're not at the beginning/end
         if start > 0:
             preview = "..." + preview
         if end < len(content):
@@ -310,18 +288,54 @@ class DocumentStorage:
         if not query.strip():
             return []
 
-        # Handle escaped asterisks
         query = query.replace("\\*", "___ESCAPED_ASTERISK___")
 
-        # Check if query ends with * (prefix search)
         if query.endswith("*"):
             prefix = query[:-1].strip()  # Remove the *
             if prefix:  # Only search if there's a prefix
                 return self.search_by_prefix(prefix, top_k)
             return []
 
-        # Restore escaped asterisks
         query = query.replace("___ESCAPED_ASTERISK___", "*")
 
-        # Use exact search
         return self.search(query, top_k)
+
+    def save(self, file_path: Path) -> None:
+        with open(file_path, "w") as f:
+            json.dump(
+                {
+                    "documents": self._doc_id_to_document,
+                    "doc_counter": self._doc_counter,
+                    "total_documents": self._total_documents,
+                    "forward_index": {
+                        "documents": self._forward_index._doc_id_to_document,
+                        "doc_lengths": self._forward_index._doc_id_to_doc_length,
+                    },
+                },
+                f,
+                indent=2,
+            )
+
+    @classmethod
+    def load(cls, file_path: Path) -> "DocumentStorage":
+        with open(file_path, "r") as f:
+            data = json.load(f)
+
+        storage = cls(
+            documents=data["documents"],
+            doc_counter=data["doc_counter"],
+            total_documents=data["total_documents"],
+            forward_index=ForwardIndex(
+                documents=data["forward_index"]["documents"],
+                doc_lengths=data["forward_index"]["doc_lengths"],
+            ),
+        )
+
+        for doc_id, word_counts in storage._forward_index._doc_id_to_document.items():
+            for word, count in word_counts.items():
+                if not storage.trie.search(word):
+                    # TODO: Use a bloom filter?
+                    storage.trie.insert(word)
+                storage.trie.add_document_to_word(word, doc_id, count)
+
+        return storage
