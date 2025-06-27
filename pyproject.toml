@@ -19,5 +19,12 @@ build-backend = "setuptools.build_meta"
 
 [dependency-groups]
 dev = [
+    "mypy>=1.14.1",
     "pytest>=8.3.5",
+    "ruff>=0.12.1",
+    "taskipy>=1.14.1",
 ]
+
+[tool.taskipy.tasks]
+format = "fd -e py -x uv run ruff format"
+typecheck = "fd -e py -x uv run mypy"

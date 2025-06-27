@@ -86,38 +86,44 @@ class TestDocumentStorage:
         doc_id = storage.add_document("This is a test document.", "test_doc")
 
         assert doc_id == "test_doc"
-        assert doc_id in storage.documents
-        assert storage.documents[doc_id] == "This is a test document."
+        doc_info = storage.get_document_info(doc_id)
+        assert doc_info is not None
+        assert doc_info["content"] == "This is a test document."
 
     def test_add_document_auto_id(self, storage):
         """Test adding a document with auto-generated ID"""
         doc_id = storage.add_document("Another test document.")
 
         assert doc_id is not None
-        assert doc_id in storage.documents
-        assert storage.documents[doc_id] == "Another test document."
+        doc_info = storage.get_document_info(doc_id)
+        assert doc_info is not None
+        assert doc_info["content"] == "Another test document."
 
     def test_delete_document(self, storage):
         """Test deleting a document"""
         doc_id = storage.add_document("Test document to delete.", "delete_test")
 
         # Verify document exists
-        assert doc_id in storage.documents
+        doc_info = storage.get_document_info(doc_id)
+        assert doc_info is not None
 
         # Delete document
         result = storage.remove_document(doc_id)
 
         # Verify document is removed
         assert result is True
-        assert doc_id not in storage.documents
-        assert len(storage.documents) == 0
+        doc_info_after = storage.get_document_info(doc_id)
+        assert doc_info_after is None
+        stats = storage.get_stats()
+        assert stats["total_documents"] == 0
 
     def test_delete_nonexistent_document(self, storage):
         """Test deleting a document that doesn't exist"""
         # Should not raise an exception
         result = storage.remove_document("nonexistent")
         assert result is False
-        assert len(storage.documents) == 0
+        stats = storage.get_stats()
+        assert stats["total_documents"] == 0
 
     def test_get_document_info(self, storage):
         """Test getting document information"""
